@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Partner API Tester</title>
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin: 24px; line-height: 1.35; }
+  label { display:block; margin-top:10px; font-weight:600; }
+  input, textarea { width: 520px; padding: 6px; }
+  textarea { height: 110px; }
+  .row { margin-top: 14px; }
+  button { margin-top: 14px; padding: 8px 14px; cursor: pointer; }
+  pre { background:#f4f4f4; padding:10px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h2>Submit Transaction (simulate Partner)</h2>
+
+<script>
+  const API_URL = "https://localhost:32771/api/SubmitTrxMessage";
+</script>
+
+<label>partnerkey</label>
+<input id="partnerkey" value="FAKEGOOGLE" />
+
+<label>partnerrefno</label>
+<input id="partnerrefno" value="FG-00001" />
+
+<label>partnerpassword (Base64)</label>
+<input id="partnerpassword" value="FAKEPASSWORD1234" oninput="changeToBase64()" />
+<input id="showBase64PartnerPassword" value="" readonly />
+
+<label>totalamount (cents)</label>
+<input id="totalamount" type="number" value="1000"  onchange="totalamountToRM()"/>
+Actually is = RM <span id="totalamount-rm"></span>
+
+<label>items (JSON)</label>
+<textarea id="items">[
+  { "partneritemref": "i-00001", "name": "Pen",   "qty": 4, "unitprice": 200 },
+  { "partneritemref": "i-00002", "name": "Ruler", "qty": 2, "unitprice": 100 }
+]</textarea>
+
+<label>timestamp (UTC ISO 8601)</label>
+<input id="timestamp" />
+
+<label>sig (auto generated)</label>
+<input id="sig" />
+
+<div class="row">
+  <button onclick="setNowAndSign()">Set Timestamp & Generate Sig</button>
+  <button onclick="send()">Send to API</button>
+</div>
+
+<h3>Request JSON</h3>
+<pre id="req"></pre>
+
+<h3>API Response</h3>
+<pre id="res"></pre>
+
+<script>
+  function changeToBase64() {
+    const input = document.getElementById("partnerpassword").value;
+    const base64 = base64FromAscii(input);
+    document.getElementById("showBase64PartnerPassword").value = base64;
+  }
+
+function totalamountToRM(){
+    const totalamount = parseInt(document.getElementById("totalamount").value, 10);
+    const rm = (totalamount / 100).toFixed(2);
+    document.getElementById("totalamount-rm").textContent = rm;
+}
+
+  // -- helper: pad 2 digits
+  const pad2 = n => n.toString().padStart(2, "0");
+  // -- format yyyyMMddHHmmss for signature timestamp
+  function toSigTimestamp(iso) {
+    const d = new Date(iso);
+    const y = d.getUTCFullYear();
+    const m = pad2(d.getUTCMonth() + 1);
+    const day = pad2(d.getUTCDate());
+    const hh = pad2(d.getUTCHours());
+    const mm = pad2(d.getUTCMinutes());
+    const ss = pad2(d.getUTCSeconds());
+    return `${y}${m}${day}${hh}${mm}${ss}`;
+  }
+
+  // SHA-256 (hex, lowercase) using Web Crypto
+  async function sha256Hex(str) {
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.digest("SHA-256", enc.encode(str));
+    const bytes = Array.from(new Uint8Array(buf));
+    return bytes.map(b => b.toString(16).padStart(2, "0")).join(""); // lower hex
+  }
+
+  // Base64 encode of ASCII string (hex is ASCII-safe)
+  function base64FromAscii(str) {
+    // btoa expects Latin1/ASCII; hex is ASCII-only, so safe
+    return btoa(str);
+  }
+
+  async function generateSig(isoUtc, partnerkey, partnerrefno, totalamount, partnerpasswordB64) {
+    // Spec order: sigtimestamp(yyyyMMddHHmmss) + partnerkey + partnerrefno + totalamount + partnerpassword(Base64)
+    // Then: SHA-256 (UTF-8) -> lowercase hex -> Base64 (UTF-8)  :contentReference[oaicite:1]{index=1}
+    const sigts = toSigTimestamp(isoUtc);
+    const concat = `${sigts}${partnerkey}${partnerrefno}${totalamount}${partnerpasswordB64}`;
+    const hex = await sha256Hex(concat);
+    return base64FromAscii(hex);
+  }
+
+  function getPayload() {
+    return {
+      partnerkey: document.getElementById("partnerkey").value.trim(),
+      partnerrefno: document.getElementById("partnerrefno").value.trim(),
+      partnerpassword: document.getElementById("showBase64PartnerPassword").value.trim(),
+      totalamount: parseInt(document.getElementById("totalamount").value, 10),
+      items: JSON.parse(document.getElementById("items").value || "[]"),
+      timestamp: document.getElementById("timestamp").value.trim(),
+      sig: document.getElementById("sig").value.trim()
+    };
+  }
+
+  async function setNowAndSign() {
+    const nowIso = new Date().toISOString();
+    document.getElementById("timestamp").value = nowIso;
+
+    const partnerkey = document.getElementById("partnerkey").value.trim();
+    const partnerrefno = document.getElementById("partnerrefno").value.trim();
+    const partnerpassword = document.getElementById("showBase64PartnerPassword").value.trim();
+    const totalamount = parseInt(document.getElementById("totalamount").value, 10);
+
+    const sig = await generateSig(nowIso, partnerkey, partnerrefno, totalamount, partnerpassword);
+    document.getElementById("sig").value = sig;
+
+    document.getElementById("req").textContent = JSON.stringify(getPayload(), null, 2);
+  }
+
+  async function send() {
+    const payload = getPayload();
+    document.getElementById("req").textContent = JSON.stringify(payload, null, 2);
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const text = await res.text();
+      document.getElementById("res").textContent = `HTTP ${res.status}\n` + text;
+    } catch (err) {
+      document.getElementById("res").textContent = "Fetch error: " + err;
+    }
+  }
+
+  setNowAndSign();
+  changeToBase64();
+  totalamountToRM();
+</script>
+</body>
+</html>
